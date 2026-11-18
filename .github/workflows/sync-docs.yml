@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: '17 * * * *'
   workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: Publish again even if the upstream commit is unchanged
+        type: boolean
+        default: false
 
 concurrency:
   group: docs-pages
@@ -30,6 +35,8 @@ jobs:
 
       - name: Select upstream release
         id: version
+        env:
+          FORCE_DEPLOY: ${{ inputs.force_deploy }}
         shell: bash
         run: |
           upstream_sha=$(curl --fail --silent --show-error --retry 2 --max-time 15 'https://api.github.com/repos/cloudbypass/cloudbypass.github.com/actions/workflows/static.yml/runs?branch=main&status=success&per_page=1' | jq -r '.workflow_runs[0].head_sha // ""')
@@ -45,7 +52,7 @@ jobs:
           fi
 
           changed=false
-          if [[ "$upstream_sha" != "$previous_sha" ]]; then
+          if [[ "$upstream_sha" != "$previous_sha" || "$FORCE_DEPLOY" == "true" ]]; then
             changed=true
           fi
           {
