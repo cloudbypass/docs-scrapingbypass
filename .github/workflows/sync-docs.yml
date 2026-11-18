@@ -1,6 +1,9 @@
 name: Sync documentation
 
 on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/sync-docs.yml']
   schedule:
     - cron: '17 * * * *'
   workflow_dispatch:
@@ -69,15 +72,7 @@ jobs:
           test -s site/docs/index.html
           rm -rf site/docs/.idea
           rm -f site/docs/CNAME
-          cat > site/index.html <<'HTML'
-          <!doctype html>
-          <html lang="en">
-          <meta charset="utf-8">
-          <meta http-equiv="refresh" content="0; url=./docs/">
-          <title>Documentation</title>
-          <a href="./docs/">Open documentation</a>
-          </html>
-          HTML
+          cp -a site/docs/. site/
 
       - name: Upload Pages artifact
         if: steps.version.outputs.changed == 'true'
