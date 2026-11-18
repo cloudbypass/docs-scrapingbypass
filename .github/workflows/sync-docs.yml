@@ -1,0 +1,127 @@
+name: Sync documentation
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: docs-pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_sha: ${{ steps.version.outputs.upstream_sha }}
+      state_commit: ${{ steps.version.outputs.state_commit }}
+      changed: ${{ steps.version.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Select upstream release
+        id: version
+        shell: bash
+        run: |
+          upstream_sha=$(curl --fail --silent --show-error --retry 2 --max-time 15 'https://api.github.com/repos/cloudbypass/cloudbypass.github.com/actions/workflows/static.yml/runs?branch=main&status=success&per_page=1' | jq -r '.workflow_runs[0].head_sha // ""')
+          [[ "$upstream_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::No successful upstream release found"; exit 1; }
+
+          state_ref=refs/heads/sync-state
+          state_commit=$(git ls-remote --heads origin "$state_ref" | cut -f1)
+          previous_sha=
+          if [[ -n "$state_commit" ]]; then
+            git fetch --no-tags --depth=1 origin "$state_commit"
+            previous_sha=$(git show "$state_commit:upstream-sha")
+            [[ "$previous_sha" =~ ^[0-9a-f]{40}$ ]]
+          fi
+
+          changed=false
+          if [[ "$upstream_sha" != "$previous_sha" ]]; then
+            changed=true
+          fi
+          {
+            echo "upstream_sha=$upstream_sha"
+            echo "state_commit=$state_commit"
+            echo "changed=$changed"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out published source
+        if: steps.version.outputs.changed == 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: cloudbypass/cloudbypass.github.com
+          ref: ${{ steps.version.outputs.upstream_sha }}
+          path: upstream
+          persist-credentials: false
+
+      - name: Package static files
+        if: steps.version.outputs.changed == 'true'
+        shell: bash
+        run: |
+          mkdir site
+          git -C upstream archive HEAD docs | tar -xf - -C site
+          test -s site/docs/index.html
+          rm -rf site/docs/.idea
+          rm -f site/docs/CNAME
+          cat > site/index.html <<'HTML'
+          <!doctype html>
+          <html lang="en">
+          <meta charset="utf-8">
+          <meta http-equiv="refresh" content="0; url=./docs/">
+          <title>Documentation</title>
+          <a href="./docs/">Open documentation</a>
+          </html>
+          HTML
+
+      - name: Upload Pages artifact
+        if: steps.version.outputs.changed == 'true'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  record:
+    needs: [prepare, deploy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Record the deployed upstream commit
+        env:
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream_sha }}
+          STATE_COMMIT: ${{ needs.prepare.outputs.state_commit }}
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          blob=$(printf '%s\n' "$UPSTREAM_SHA" | git hash-object -w --stdin)
+          tree=$(printf '100644 blob %s\tupstream-sha\n' "$blob" | git mktree)
+          parents=()
+          if [[ -n "$STATE_COMMIT" ]]; then
+            git fetch --no-tags --depth=1 origin "$STATE_COMMIT"
+            parents=(-p "$STATE_COMMIT")
+          fi
+          commit=$(git commit-tree "$tree" "${parents[@]}" -m "Record deployed upstream $UPSTREAM_SHA")
+          git push origin "$commit:refs/heads/sync-state"
